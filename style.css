@@ -1,0 +1,225 @@
+:root {
+  --bg: #050505;
+  --card: #0a0a0a;
+  --border: rgba(0, 255, 0, 0.15);
+  --border-hover: rgba(0, 255, 0, 0.45);
+  --lime: #00FF00;
+  --lime-dim: rgba(0, 255, 0, 0.6);
+  --text: #ffffff;
+  --muted: #9CA3AF;
+  --error: #ff5050;
+  --ok: #00FF00;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+body {
+  background:
+    radial-gradient(ellipse at top, rgba(0, 255, 0, 0.04), transparent 60%),
+    var(--bg);
+  padding: 32px 16px 64px;
+}
+
+.container {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+header {
+  margin-bottom: 32px;
+  text-align: center;
+}
+
+h1 {
+  font-size: 36px;
+  font-weight: 900;
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+}
+
+.lime { color: var(--lime); }
+
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--lime);
+  margin-bottom: 12px;
+}
+
+.muted { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+.small { font-size: 11px; }
+.muted code, .status code {
+  background: rgba(0, 255, 0, 0.08);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--lime);
+  font-size: 12px;
+}
+
+.field {
+  margin-bottom: 12px;
+}
+
+.field label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.field input {
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--lime);
+}
+
+button {
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px 20px;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.05s;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+button:not(:disabled):hover { opacity: 0.85; }
+button:not(:disabled):active { transform: translateY(1px); }
+
+.primary {
+  background: var(--lime);
+  color: #050505;
+}
+
+.secondary {
+  background: transparent;
+  color: var(--lime);
+  border: 1px solid var(--border-hover);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+.status.ok { color: var(--ok); }
+.status.error { color: var(--error); }
+
+.progressWrap {
+  margin-top: 16px;
+}
+
+.progressLabel {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+#progressPct { color: var(--lime); }
+
+.progress {
+  background: #000;
+  border: 1px solid var(--border);
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+#progressBar {
+  background: var(--lime);
+  height: 100%;
+  width: 0%;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+}
+
+.log {
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  height: 280px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+
+.log .ok { color: var(--ok); }
+.log .err { color: var(--error); }
+.log .info { color: var(--muted); }
+.log .lime { color: var(--lime); }
+
+footer {
+  margin-top: 32px;
+  text-align: center;
+}
+
+footer code {
+  font-size: 10px;
+  color: var(--lime-dim);
+}
+
+@media (max-width: 600px) {
+  body { padding: 16px 8px 48px; }
+  h1 { font-size: 28px; }
+  .card { padding: 16px; }
+  .row { flex-direction: column; }
+  .row button { width: 100%; }
+}

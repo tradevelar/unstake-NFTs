@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unstake NFTs · Admin</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>UNSTAKE <span class="lime">NFTs</span></h1>
+      <p class="sub">Admin tool. Grant operator roles, then force-unstake every NFT in a staking pool.</p>
+    </header>
+
+    <section class="card">
+      <h2>Configuration</h2>
+
+      <div class="field">
+        <label>Staking pool address</label>
+        <input id="stakingInput" type="text" value="0x964add004ab4784473a4a7fe90e4f4a0dd39b2e8" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>NFT collection address</label>
+        <input id="nftInput" type="text" value="0x61d6e954b90d6506ce6964682744bfc2d51abebd" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>Recovery contract (gets OPERATOR_ROLE)</label>
+        <input id="recoveryInput" type="text" value="0x7adfec6382b2ee4ab9e8248b2f735937e52b43ee" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>Operator wallet (gets OPERATOR_ROLE)</label>
+        <input id="operatorInput" type="text" value="0xeDF0a6C58658aBe4E2dF3E3B193d9D2CD443599a" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>Batch size (NFTs per tx)</label>
+        <input id="batchInput" type="number" value="25" min="1" max="50" />
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Wallet</h2>
+      <p id="walletState" class="muted">Not connected. VeWorld extension required.</p>
+      <button id="connectBtn" class="primary">Connect Wallet</button>
+    </section>
+
+    <section class="card">
+      <h2>Step 1 · Grant OPERATOR roles</h2>
+      <p class="muted">Single multi-clause transaction. Grants <code>OPERATOR_ROLE</code> on the staking pool to both addresses above. Connected wallet must hold <code>DEFAULT_ADMIN</code> on the staking pool.</p>
+      <button id="grantBtn" class="primary" disabled>Grant Operator Roles</button>
+      <p id="grantStatus" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>Step 2 · Unstake loop</h2>
+      <p class="muted">Calls <code>recoverERC721fromStaked(0, batch, staking, nft)</code> on the recovery contract while remaining ≥ 50, then switches to per-token <code>callExit(tokenId, staking)</code> for the tail (avoids the off-by-one Panic 0x32 in the batch function).</p>
+
+      <div class="row">
+        <button id="testOneBtn" class="secondary" disabled>Test 1 NFT first</button>
+        <button id="unstakeBtn" class="primary" disabled>Start Unstaking</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <button id="refreshBtn" class="secondary">Refresh balance</button>
+      </div>
+
+      <div class="progressWrap">
+        <div class="progressLabel">
+          <span id="progressText">— / —</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <div class="progress"><div id="progressBar"></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Live log</h2>
+      <pre id="log" class="log">[idle]</pre>
+    </section>
+
+    <footer>
+      <p class="muted small">
+        Operates against VeChain mainnet via <code>https://mainnet.vechain.org</code>.
+        Wallet signing via VeWorld extension (<code>window.connex</code>).
+      </p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

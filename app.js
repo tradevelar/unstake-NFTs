@@ -151,30 +151,78 @@ function lockInputsForRun(locked) {
 // ──────────────────────────────────────────────────────────────────────
 // Connex helpers
 // ──────────────────────────────────────────────────────────────────────
+//
+// VeWorld evolution:
+//   - VeChain Sync2 (legacy desktop wallet): injected window.connex
+//     directly with .thor and .vendor.
+//   - VeWorld extension (current): injects window.vechain. The dApp
+//     calls window.vechain.newConnex({ node, network }) to obtain a
+//     Connex instance. Older extension builds also inject
+//     window.connex for backwards compatibility, but we cannot rely
+//     on that.
+//
+// ensureConnex() polls for either shape for up to 4 seconds before
+// giving up. Cached after first success so the rest of the flow is
+// effectively synchronous.
 
-function getConnex() {
-  if (!window.connex || !window.connex.thor || !window.connex.vendor) {
-    throw new Error('VeWorld extension not detected. Install VeWorld and reload this page.')
+let _connex = null
+
+async function ensureConnex(timeoutMs = 4000) {
+  if (_connex) return _connex
+
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    // Modern VeWorld: window.vechain with newConnex factory.
+    if (window.vechain && typeof window.vechain.newConnex === 'function') {
+      try {
+        _connex = await window.vechain.newConnex({
+          node: 'https://mainnet.vechain.org',
+          network: 'main',
+        })
+        return _connex
+      } catch (e) {
+        // Sometimes throws on first call; fall through and retry.
+      }
+    }
+
+    // Some VeWorld versions expose thor/vendor directly on window.vechain.
+    if (window.vechain && window.vechain.thor && window.vechain.vendor) {
+      _connex = window.vechain
+      return _connex
+    }
+
+    // Legacy VeChain Sync2 / older VeWorld.
+    if (window.connex && window.connex.thor && window.connex.vendor) {
+      _connex = window.connex
+      return _connex
+    }
+
+    await new Promise((res) => setTimeout(res, 100))
   }
-  return window.connex
+
+  const seen = `window.vechain=${typeof window.vechain}, window.connex=${typeof window.connex}`
+  throw new Error(
+    `VeWorld not detected after ${timeoutMs}ms. ${seen}. ` +
+    'Install VeWorld and make sure it is enabled for this site.'
+  )
 }
 
 async function readBalanceOf(tokenAddr, holder) {
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const method = connex.thor.account(tokenAddr).method(ABI_BALANCE_OF)
   const r = await method.call(holder)
   return BigInt(r.decoded[0])
 }
 
 async function readHasRole(contractAddr, role, account) {
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const method = connex.thor.account(contractAddr).method(ABI_HAS_ROLE)
   const r = await method.call(role, account)
   return Boolean(r.decoded[0])
 }
 
 async function signClauses(clauses, comment) {
-  const connex = getConnex()
+  const connex = await ensureConnex()
   let signing = connex.vendor.sign('tx', clauses)
   if (state.signer) signing = signing.signer(state.signer)
   if (comment) signing = signing.comment(comment)
@@ -182,7 +230,7 @@ async function signClauses(clauses, comment) {
 }
 
 async function waitForReceipt(txid, { timeoutMs = 90000, intervalMs = 3000 } = {}) {
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     const r = await connex.thor.transaction(txid).getReceipt()
@@ -198,7 +246,7 @@ async function waitForReceipt(txid, { timeoutMs = 90000, intervalMs = 3000 } = {
 
 async function connectWallet() {
   try {
-    const connex = getConnex()
+    const connex = await ensureConnex()
     const cert = {
       purpose: 'identification',
       payload: { type: 'text', content: 'Sign in to Unstake NFTs admin tool' },
@@ -261,7 +309,7 @@ async function grantOperatorRoles() {
     log(`Admin role probe failed: ${err.message}`, 'err')
   }
 
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const method = connex.thor.account(staking).method(ABI_GRANT_ROLE)
   const clauses = []
   if (needRecovery) clauses.push(method.asClause(OPERATOR_ROLE, recovery))
@@ -308,7 +356,7 @@ async function refreshBalance() {
 }
 
 async function readFirstStakedTokenId(nft, staking) {
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const m = connex.thor.account(nft).method(ABI_TOKEN_OF_OWNER_BY_INDEX)
   const r = await m.call(staking, 0)
   return r.decoded[0]
@@ -327,7 +375,7 @@ async function testOneNFT() {
   try {
     const tokenId = await readFirstStakedTokenId(nft, staking)
     log(`First staked tokenId: ${tokenId}`, 'info')
-    const connex = getConnex()
+    const connex = await ensureConnex()
     const method = connex.thor.account(recovery).method(ABI_CALL_EXIT)
     const clause = method.asClause(tokenId, staking)
     const r = await connex.vendor.sign('tx', [clause])
@@ -395,7 +443,7 @@ async function startUnstake() {
 
   const total = initial
   let batch = 1
-  const connex = getConnex()
+  const connex = await ensureConnex()
   const batchMethod = connex.thor.account(recovery).method(ABI_RECOVER_BATCH)
   const exitMethod  = connex.thor.account(recovery).method(ABI_CALL_EXIT)
 
@@ -486,12 +534,15 @@ els.stopBtn.addEventListener('click', stopUnstake)
 els.refreshBtn.addEventListener('click', refreshBalance)
 $('testOneBtn').addEventListener('click', testOneNFT)
 
-// On load: if VeWorld is already there, hint at it.
-window.addEventListener('load', () => {
-  if (window.connex && window.connex.thor) {
+// On load: poll for VeWorld injection and report what we see. Detection
+// runs through ensureConnex(), which understands both the modern
+// window.vechain shape and the legacy window.connex one.
+window.addEventListener('load', async () => {
+  try {
+    await ensureConnex()
     log('VeWorld detected. Click Connect Wallet to start.', 'ok')
-  } else {
-    log('VeWorld not detected. Install the extension and reload.', 'err')
+  } catch (err) {
+    log(err.message, 'err')
   }
   refreshBalance().catch(() => {})
 })

@@ -293,8 +293,8 @@ async function startUnstake() {
     log('Fill all addresses + batch size first.', 'err')
     return
   }
-  if (batchSize < 1 || batchSize > 40) {
-    log('Batch size must be between 1 and 40 (block gas constraint).', 'err')
+  if (batchSize < 1 || batchSize > 100) {
+    log('Batch size must be between 1 and 100 (block gas constraint).', 'err')
     return
   }
 

@@ -1,28 +1,59 @@
 # Unstake NFTs · Admin tool
 
-Static one-pager for force-unstaking every NFT from a VeChain staking pool. Two buttons, one wallet signature per action, no backend.
+Static one-pager to force-unstake every NFT from a VeChain staking pool. Direct `exit(tokenId)` calls, multi-clause batches. No backend, no build.
 
 ## What it does
 
-1. **Grant OPERATOR_ROLE** on a staking pool to a recovery contract and an operator wallet (one multi-clause transaction).
-2. **Loop `recoverERC721fromStaked(0, batch, staking, nft)`** on the recovery contract until the pool's NFT balance hits zero. Each batch is one signature.
+For each NFT held by the staking pool:
 
-The script auto-shifts to single-NFT calls when fewer than 50 are left to avoid the known off-by-one bug in `recoverERC721fromStaked` (see `PLAYBOOK.md` in the upstream kit).
+1. Reads the next tokenId via `tokenOfOwnerByIndex(staking, 0)`.
+2. Packs N `exit(tokenId)` calls into a single multi-clause transaction.
+3. Signs once with VeWorld.
+4. `exit()` sends the NFT back to its original `ticketOwner` (recorded in the staking contract's `tokenDetail`) and records pending reward in `rewards[tokenId]`.
+5. Loops until the pool's NFT balance hits zero.
+
+411 NFTs at batch size 20 → ~21 signed transactions instead of 411.
 
 ## Requirements
 
-- VeChain mainnet
-- VeWorld browser extension (injects `window.connex`)
-- The connected wallet must hold `DEFAULT_ADMIN` on the staking pool for Step 1
-- The recovery contract must hold `OPERATOR_ROLE` on the staking pool for Step 2 (Step 1 grants this)
+- VeChain mainnet (`https://mainnet.vechain.org`)
+- VeWorld browser extension
+- The connected wallet must hold `DEFAULT_ADMIN` (or `OPERATOR_ROLE`) on the staking pool — otherwise `exit()` reverts on the access-control check
+
+## Flow
+
+1. **Connect Wallet** — VeWorld cert sign, no funds move
+2. **Test 1 NFT first** — single `exit()` on the first staked tokenId. If it confirms, the loop will too. If it reverts, fix permissions before going wide
+3. **Start Unstaking** — loops multi-clause batches until the pool is empty. Stop button takes effect after the in-flight batch completes
 
 ## Run locally
 
-Open `index.html` in a browser with VeWorld installed. No build, no install.
+```
+open index.html
+```
 
-## Deploy on GitHub Pages
+VeWorld extension auto-injects on file:// and any HTTPS site.
 
-Push to a public repo. In repo settings → Pages → Source = `main` branch, `/ (root)` folder. Site goes live at `https://<user>.github.io/<repo>/`.
+## Deploy on GitHub Pages or Vercel
+
+Push to a public repo. On Vercel: import → framework "Other" → build command empty → output dir `.` → deploy.
+
+## Default config (editable from the UI)
+
+| Field | Value |
+| --- | --- |
+| Staking pool | `0x964add004ab4784473a4a7fe90e4f4a0dd39b2e8` (Female Goatz) |
+| NFT collection | `0x61d6e954b90d6506ce6964682744bfc2d51abebd` |
+| Batch size | 20 exits per signed transaction |
+
+## Rewards (WoV)
+
+`exit()` on this contract does NOT auto-transfer the pending WoV reward. It only records the amount in `rewards[tokenId]`. After the unstake loop completes:
+
+- Top up the staking pool with enough WoV to cover the sum of pending rewards
+- Each original staker can then call `getReward(tokenId)` to claim
+
+The unstake tool only handles NFT recovery. Reward distribution is a separate operation.
 
 ## Files
 
@@ -30,23 +61,6 @@ Push to a public repo. In repo settings → Pages → Source = `main` branch, `/
 unstake-NFTs/
 ├── index.html   page layout, inputs, buttons, log
 ├── style.css    dark + lime palette, single-column responsive
-├── app.js       Connex wiring: connect, grantRole, recovery loop
+├── app.js       Connex/VeWorld wiring, exit() batches
 └── README.md    this file
 ```
-
-## Default config (editable from the UI)
-
-| Field | Value |
-| --- | --- |
-| Staking pool | `0x964add004ab4784473a4a7fe90e4f4a0dd39b2e8` |
-| NFT collection | `0x61d6e954b90d6506ce6964682744bfc2d51abebd` |
-| Recovery contract | `0x7adfec6382b2ee4ab9e8248b2f735937e52b43ee` |
-| Operator wallet | `0xeDF0a6C58658aBe4E2dF3E3B193d9D2CD443599a` |
-| Batch size | 25 |
-
-## Safety notes
-
-- The connect step is a `cert` signature only. No funds move.
-- Step 1 emits one multi-clause `grantRole` tx. Wallet shows both clauses before signing.
-- Step 2 emits one tx per batch. The Stop button takes effect after the in-flight batch completes — it does not cancel a pending signature.
-- All operations are visible on chain. The log shows every `txid`. Cross-check on `vechainstats.com` if anything looks off.

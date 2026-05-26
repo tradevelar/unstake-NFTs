@@ -1,37 +1,26 @@
-// Unstake NFTs admin tool — vanilla JS, Connex-based.
+// Unstake NFTs admin tool — vanilla JS, Connex/VeWorld based.
 //
-// Drives two operations against a VeChain staking pool:
-//   1. Grant OPERATOR_ROLE on the pool to a recovery contract + an
-//      operator wallet (multi-clause, one signature).
-//   2. Loop `recoverERC721fromStaked(0, batch, staking, nft)` on the
-//      recovery contract until the staking pool is drained.
+// Calls staking.exit(tokenId) DIRECTLY on the staking pool, batched
+// as multi-clause transactions. Each exit() sends the NFT back to its
+// original ticketOwner (recorded in tokenDetail). The connected wallet
+// must hold DEFAULT_ADMIN (or OPERATOR_ROLE) on the staking pool.
 //
-// Wallet: VeWorld extension. Requires `window.connex` to be injected.
-// Network: VeChain mainnet (https://mainnet.vechain.org).
+// Why not go through a recovery contract: the recovery intermediary
+// adds a second permission layer (caller needs OPERATOR_ROLE on the
+// recovery contract too), and complicates the failure surface. The
+// admin already has all the access they need; we just sign clauses.
 
-const OPERATOR_ROLE = '0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929'
-const ADMIN_ROLE    = '0x0000000000000000000000000000000000000000000000000000000000000000'
+const NODE_URL = 'https://mainnet.vechain.org'
 
-// Minimal ABIs we need for asClause / call.
-const ABI_GRANT_ROLE = {
-  inputs: [
-    { internalType: 'bytes32', name: 'role',    type: 'bytes32' },
-    { internalType: 'address', name: 'account', type: 'address' },
-  ],
-  name: 'grantRole',
+// ──────────────────────────────────────────────────────────────────────
+// ABIs (minimal, just what we call)
+// ──────────────────────────────────────────────────────────────────────
+
+const ABI_EXIT = {
+  inputs: [{ internalType: 'uint256', name: '_tokenId', type: 'uint256' }],
+  name: 'exit',
   outputs: [],
   stateMutability: 'nonpayable',
-  type: 'function',
-}
-
-const ABI_HAS_ROLE = {
-  inputs: [
-    { internalType: 'bytes32', name: 'role',    type: 'bytes32' },
-    { internalType: 'address', name: 'account', type: 'address' },
-  ],
-  name: 'hasRole',
-  outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
-  stateMutability: 'view',
   type: 'function',
 }
 
@@ -40,33 +29,6 @@ const ABI_BALANCE_OF = {
   name: 'balanceOf',
   outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
   stateMutability: 'view',
-  type: 'function',
-}
-
-const ABI_RECOVER_BATCH = {
-  inputs: [
-    { internalType: 'uint256', name: 'start',   type: 'uint256' },
-    { internalType: 'uint256', name: 'size',    type: 'uint256' },
-    { internalType: 'address', name: 'staking', type: 'address' },
-    { internalType: 'address', name: 'nft',     type: 'address' },
-  ],
-  name: 'recoverERC721fromStaked',
-  outputs: [],
-  stateMutability: 'nonpayable',
-  type: 'function',
-}
-
-// Per-token exit on the recovery contract. The batch function has a
-// documented off-by-one at i=0 (Panic 0x32) when remaining is small,
-// so we fall through to callExit individually once remaining < 50.
-const ABI_CALL_EXIT = {
-  inputs: [
-    { internalType: 'uint256', name: 'tokenId', type: 'uint256' },
-    { internalType: 'address', name: 'staking', type: 'address' },
-  ],
-  name: 'callExit',
-  outputs: [],
-  stateMutability: 'nonpayable',
   type: 'function',
 }
 
@@ -80,8 +42,6 @@ const ABI_TOKEN_OF_OWNER_BY_INDEX = {
   stateMutability: 'view',
   type: 'function',
 }
-
-const CALLEXIT_THRESHOLD = 50
 
 // State
 const state = {
@@ -98,13 +58,11 @@ const $ = (id) => document.getElementById(id)
 const els = {
   staking:     $('stakingInput'),
   nft:         $('nftInput'),
-  recovery:    $('recoveryInput'),
-  operator:    $('operatorInput'),
   batch:       $('batchInput'),
   walletState: $('walletState'),
   connectBtn:  $('connectBtn'),
-  grantBtn:    $('grantBtn'),
-  grantStatus: $('grantStatus'),
+  testOneBtn:  $('testOneBtn'),
+  testStatus:  $('testStatus'),
   unstakeBtn:  $('unstakeBtn'),
   stopBtn:     $('stopBtn'),
   refreshBtn:  $('refreshBtn'),
@@ -119,7 +77,6 @@ function log(line, cls = '') {
   const span = document.createElement('span')
   if (cls) span.className = cls
   span.textContent = `[${time}] ${line}\n`
-  // Replace the [idle] placeholder on first real log.
   if (els.log.textContent === '[idle]') els.log.textContent = ''
   els.log.appendChild(span)
   els.log.scrollTop = els.log.scrollHeight
@@ -132,38 +89,29 @@ function setProgress(current, total) {
   els.progressPct.textContent = pct + '%'
 }
 
-function setGrantStatus(text, cls = '') {
-  els.grantStatus.textContent = text
-  els.grantStatus.className = 'status ' + cls
+function setTestStatus(text, cls = '') {
+  els.testStatus.textContent = text
+  els.testStatus.className = 'status ' + cls
 }
 
 function lockInputsForRun(locked) {
-  ['staking', 'nft', 'recovery', 'operator', 'batch'].forEach((k) => {
+  ['staking', 'nft', 'batch'].forEach((k) => {
     els[k].disabled = locked
   })
-  els.grantBtn.disabled = locked || !state.signer
+  els.testOneBtn.disabled = locked || !state.signer
   els.unstakeBtn.disabled = locked || !state.signer
-  $('testOneBtn').disabled = locked || !state.signer
   els.connectBtn.disabled = locked
   els.stopBtn.disabled = !locked
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Connex helpers
+// Connex / VeWorld detection
 // ──────────────────────────────────────────────────────────────────────
 //
-// VeWorld evolution:
-//   - VeChain Sync2 (legacy desktop wallet): injected window.connex
-//     directly with .thor and .vendor.
-//   - VeWorld extension (current): injects window.vechain. The dApp
-//     calls window.vechain.newConnex({ node, network }) to obtain a
-//     Connex instance. Older extension builds also inject
-//     window.connex for backwards compatibility, but we cannot rely
-//     on that.
-//
-// ensureConnex() polls for either shape for up to 4 seconds before
-// giving up. Cached after first success so the rest of the flow is
-// effectively synchronous.
+// VeWorld extension (current builds) injects window.vechain with a
+// newConnex({ node, network }) factory. Older Sync2 / older VeWorld
+// builds injected window.connex directly. Detect both, poll briefly
+// to give the extension time to inject.
 
 let _connex = null
 
@@ -172,31 +120,25 @@ async function ensureConnex(timeoutMs = 4000) {
 
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    // Modern VeWorld: window.vechain with newConnex factory.
     if (window.vechain && typeof window.vechain.newConnex === 'function') {
       try {
         _connex = await window.vechain.newConnex({
-          node: 'https://mainnet.vechain.org',
+          node: NODE_URL,
           network: 'main',
         })
         return _connex
       } catch (e) {
-        // Sometimes throws on first call; fall through and retry.
+        // sometimes throws on first invocation; loop and retry
       }
     }
-
-    // Some VeWorld versions expose thor/vendor directly on window.vechain.
     if (window.vechain && window.vechain.thor && window.vechain.vendor) {
       _connex = window.vechain
       return _connex
     }
-
-    // Legacy VeChain Sync2 / older VeWorld.
     if (window.connex && window.connex.thor && window.connex.vendor) {
       _connex = window.connex
       return _connex
     }
-
     await new Promise((res) => setTimeout(res, 100))
   }
 
@@ -207,29 +149,39 @@ async function ensureConnex(timeoutMs = 4000) {
   )
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Chain reads
+// ──────────────────────────────────────────────────────────────────────
+
 async function readBalanceOf(tokenAddr, holder) {
   const connex = await ensureConnex()
-  const method = connex.thor.account(tokenAddr).method(ABI_BALANCE_OF)
-  const r = await method.call(holder)
+  const m = connex.thor.account(tokenAddr).method(ABI_BALANCE_OF)
+  const r = await m.call(holder)
   return BigInt(r.decoded[0])
 }
 
-async function readHasRole(contractAddr, role, account) {
+async function readTokenIdAt(nftAddr, owner, index) {
   const connex = await ensureConnex()
-  const method = connex.thor.account(contractAddr).method(ABI_HAS_ROLE)
-  const r = await method.call(role, account)
-  return Boolean(r.decoded[0])
+  const m = connex.thor.account(nftAddr).method(ABI_TOKEN_OF_OWNER_BY_INDEX)
+  const r = await m.call(owner, index)
+  return r.decoded[0]
 }
 
-async function signClauses(clauses, comment) {
+// Batch-fetch tokenIds at indices [0..n-1] in parallel.
+async function readNextNTokenIds(nftAddr, staking, n) {
   const connex = await ensureConnex()
-  let signing = connex.vendor.sign('tx', clauses)
-  if (state.signer) signing = signing.signer(state.signer)
-  if (comment) signing = signing.comment(comment)
-  return signing.request()
+  const m = connex.thor.account(nftAddr).method(ABI_TOKEN_OF_OWNER_BY_INDEX)
+  const tasks = []
+  for (let i = 0; i < n; i++) {
+    tasks.push(
+      m.call(staking, i).then((r) => r.decoded[0]).catch(() => null)
+    )
+  }
+  const results = await Promise.all(tasks)
+  return results.filter((x) => x !== null && x !== undefined)
 }
 
-async function waitForReceipt(txid, { timeoutMs = 90000, intervalMs = 3000 } = {}) {
+async function waitForReceipt(txid, { timeoutMs = 120000, intervalMs = 3000 } = {}) {
   const connex = await ensureConnex()
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
@@ -255,9 +207,8 @@ async function connectWallet() {
     state.signer = r.annex.signer
     els.walletState.innerHTML = `Connected as <code class="lime">${state.signer}</code>`
     els.walletState.classList.remove('muted')
-    els.grantBtn.disabled = false
+    els.testOneBtn.disabled = false
     els.unstakeBtn.disabled = false
-    $('testOneBtn').disabled = false
     log(`Wallet connected: ${state.signer}`, 'ok')
   } catch (err) {
     log(`Connect failed: ${err.message}`, 'err')
@@ -265,74 +216,49 @@ async function connectWallet() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Step 1 — Grant OPERATOR_ROLE
+// Step 1 — Test 1 NFT
 // ──────────────────────────────────────────────────────────────────────
 
-async function grantOperatorRoles() {
+async function testOneNFT() {
   if (!state.signer) return
-  const staking  = els.staking.value.trim()
-  const recovery = els.recovery.value.trim()
-  const operator = els.operator.value.trim()
-
-  if (!staking || !recovery || !operator) {
-    setGrantStatus('Fill all three addresses first.', 'error')
+  const staking = els.staking.value.trim()
+  const nft     = els.nft.value.trim()
+  if (!staking || !nft) {
+    setTestStatus('Fill staking + nft addresses first.', 'error')
     return
   }
-
-  setGrantStatus('Checking current roles...')
-  log(`Checking OPERATOR_ROLE on staking ${staking}...`, 'info')
-
-  let needRecovery = true, needOperator = true
+  setTestStatus('Reading first staked tokenId...')
+  log('Test: reading tokenOfOwnerByIndex(staking, 0)...', 'info')
   try {
-    needRecovery = !(await readHasRole(staking, OPERATOR_ROLE, recovery))
-    needOperator = !(await readHasRole(staking, OPERATOR_ROLE, operator))
-  } catch (err) {
-    log(`hasRole probe failed (will grant unconditionally): ${err.message}`, 'err')
-  }
+    const tokenId = await readTokenIdAt(nft, staking, 0)
+    log(`First staked tokenId: ${tokenId}`, 'info')
 
-  if (!needRecovery && !needOperator) {
-    setGrantStatus('Both addresses already have OPERATOR_ROLE. Nothing to do.', 'ok')
-    log('Both addresses already operator. Skipping.', 'ok')
-    return
-  }
+    const connex = await ensureConnex()
+    const exitMethod = connex.thor.account(staking).method(ABI_EXIT)
+    const clause = exitMethod.asClause(tokenId)
 
-  // Sanity: connected wallet must hold DEFAULT_ADMIN on staking pool.
-  try {
-    const isAdmin = await readHasRole(staking, ADMIN_ROLE, state.signer)
-    if (!isAdmin) {
-      const msg = 'Connected wallet does not hold DEFAULT_ADMIN on the staking pool. Cannot grant roles.'
-      setGrantStatus(msg, 'error')
-      log(msg, 'err')
-      return
-    }
-  } catch (err) {
-    log(`Admin role probe failed: ${err.message}`, 'err')
-  }
-
-  const connex = await ensureConnex()
-  const method = connex.thor.account(staking).method(ABI_GRANT_ROLE)
-  const clauses = []
-  if (needRecovery) clauses.push(method.asClause(OPERATOR_ROLE, recovery))
-  if (needOperator) clauses.push(method.asClause(OPERATOR_ROLE, operator))
-
-  setGrantStatus(`Awaiting signature for ${clauses.length} grantRole clause(s)...`)
-  log(`Submitting grantRole × ${clauses.length}...`, 'info')
-
-  try {
-    const r = await signClauses(clauses, 'Grant OPERATOR_ROLE on staking pool')
+    setTestStatus(`Signing exit(${tokenId})...`)
+    const r = await connex.vendor.sign('tx', [clause])
+      .signer(state.signer)
+      .gas(400000)
+      .comment(`Test exit(${tokenId}) on ${staking.slice(0, 10)}…`)
+      .request()
     log(`Tx submitted: ${r.txid}`, 'lime')
-    setGrantStatus(`Waiting for confirmation... (${r.txid.slice(0, 10)}…)`)
+
+    setTestStatus(`Waiting for receipt (${r.txid.slice(0, 10)}…)...`)
     const receipt = await waitForReceipt(r.txid)
     if (receipt.reverted) {
-      setGrantStatus('Transaction reverted. Check the connected wallet has DEFAULT_ADMIN on the pool.', 'error')
-      log(`Grant reverted: ${r.txid}`, 'err')
+      setTestStatus('Reverted. exit() does not pass on this pool from this wallet.', 'error')
+      log(`Test reverted at block ${receipt.meta.blockNumber}`, 'err')
+      log(`Likely cause: signer wallet does not have DEFAULT_ADMIN/OPERATOR on the staking pool.`, 'err')
     } else {
-      setGrantStatus('Granted ✓ Recovery contract + operator wallet now have OPERATOR_ROLE.', 'ok')
-      log(`Grant confirmed in block ${receipt.meta.blockNumber}`, 'ok')
+      setTestStatus(`Passed ✓ Token ${tokenId} returned to original staker. Safe to run the full loop.`, 'ok')
+      log(`Test confirmed in block ${receipt.meta.blockNumber}. NFT back to ticketOwner.`, 'ok')
     }
+    await refreshBalance()
   } catch (err) {
-    setGrantStatus(`Failed: ${err.message}`, 'error')
-    log(`Grant failed: ${err.message}`, 'err')
+    setTestStatus(`Failed: ${err.message}`, 'error')
+    log(`Test failed: ${err.message}`, 'err')
   }
 }
 
@@ -355,85 +281,38 @@ async function refreshBalance() {
   }
 }
 
-async function readFirstStakedTokenId(nft, staking) {
-  const connex = await ensureConnex()
-  const m = connex.thor.account(nft).method(ABI_TOKEN_OF_OWNER_BY_INDEX)
-  const r = await m.call(staking, 0)
-  return r.decoded[0]
-}
-
-async function testOneNFT() {
-  if (!state.signer) return
-  const staking  = els.staking.value.trim()
-  const nft      = els.nft.value.trim()
-  const recovery = els.recovery.value.trim()
-  if (!staking || !nft || !recovery) {
-    log('Fill staking + nft + recovery addresses first.', 'err')
-    return
-  }
-  log('Test mode: pulling one NFT via callExit(tokenId, staking)...', 'lime')
-  try {
-    const tokenId = await readFirstStakedTokenId(nft, staking)
-    log(`First staked tokenId: ${tokenId}`, 'info')
-    const connex = await ensureConnex()
-    const method = connex.thor.account(recovery).method(ABI_CALL_EXIT)
-    const clause = method.asClause(tokenId, staking)
-    const r = await connex.vendor.sign('tx', [clause])
-      .signer(state.signer)
-      .gas(800000)
-      .comment(`Test callExit(${tokenId}, ${staking.slice(0, 10)}…)`)
-      .request()
-    log(`Tx submitted: ${r.txid}`, 'lime')
-    const receipt = await waitForReceipt(r.txid)
-    if (receipt.reverted) {
-      log(`Test reverted. exit() on this pool is NOT working as expected.`, 'err')
-      log('Likely cause: internal staker mapping was cleared (totalSupply=0).', 'err')
-      log('Try forceUnstake(address, tokenId) instead, or contact the contract owner.', 'err')
-    } else {
-      log(`Test passed ✓ NFT ${tokenId} returned to original staker in block ${receipt.meta.blockNumber}.`, 'ok')
-      log('Safe to run the full unstake loop.', 'ok')
-    }
-    await refreshBalance()
-  } catch (err) {
-    log(`Test failed: ${err.message}`, 'err')
-  }
-}
-
 async function startUnstake() {
   if (state.running) return
   if (!state.signer) return
 
   const staking   = els.staking.value.trim()
   const nft       = els.nft.value.trim()
-  const recovery  = els.recovery.value.trim()
   const batchSize = parseInt(els.batch.value, 10)
 
-  if (!staking || !nft || !recovery || !batchSize) {
+  if (!staking || !nft || !batchSize) {
     log('Fill all addresses + batch size first.', 'err')
     return
   }
-  if (batchSize < 1 || batchSize > 50) {
-    log('Batch size must be between 1 and 50.', 'err')
+  if (batchSize < 1 || batchSize > 40) {
+    log('Batch size must be between 1 and 40 (block gas constraint).', 'err')
     return
   }
 
   state.running = true
   state.stopRequested = false
   lockInputsForRun(true)
-  log(`==== Unstake loop started ====`, 'lime')
+  log('==== Unstake loop started ====', 'lime')
   log(`Staking pool: ${staking}`, 'info')
   log(`NFT:          ${nft}`, 'info')
-  log(`Recovery:     ${recovery}`, 'info')
-  log(`Batch size:   ${batchSize}`, 'info')
+  log(`Batch size:   ${batchSize} exit() clauses per tx`, 'info')
 
-  let initial = await refreshBalance()
+  const initial = await refreshBalance()
   if (initial == null) {
     log('Could not read initial balance. Aborting.', 'err')
     state.running = false
     lockInputsForRun(false)
     return
   }
-
   if (initial === 0) {
     log('Staking pool already empty. Nothing to do.', 'ok')
     state.running = false
@@ -444,8 +323,7 @@ async function startUnstake() {
   const total = initial
   let batch = 1
   const connex = await ensureConnex()
-  const batchMethod = connex.thor.account(recovery).method(ABI_RECOVER_BATCH)
-  const exitMethod  = connex.thor.account(recovery).method(ABI_CALL_EXIT)
+  const exitMethod = connex.thor.account(staking).method(ABI_EXIT)
 
   while (!state.stopRequested) {
     const remaining = await readBalanceOf(nft, staking).then(Number)
@@ -454,46 +332,46 @@ async function startUnstake() {
       break
     }
 
-    // Two-mode strategy from the upstream playbook:
-    //   remaining >= 50  → recoverERC721fromStaked in chunks of batchSize
-    //   remaining <  50  → callExit per-token to dodge the off-by-one
-    //                      Panic 0x32 in the batch function.
-    const useBatch = remaining >= CALLEXIT_THRESHOLD
-    const size = useBatch ? Math.min(batchSize, remaining) : 1
-    const mode = useBatch ? 'batch' : 'callExit'
-    const label = `Tx #${batch} · ${mode} · size ${size} · remaining ${remaining}`
+    const size = Math.min(batchSize, remaining)
+    const label = `Tx #${batch} · packing ${size} exits · remaining ${remaining}`
     log(label, 'info')
 
     try {
-      let clause, gas, comment, displayedAction
-      if (useBatch) {
-        clause = batchMethod.asClause(0, size, staking, nft)
-        gas = 500000 + 250000 * size
-        comment = `recoverERC721fromStaked(0, ${size}, ${staking.slice(0, 10)}…, ${nft.slice(0, 10)}…)`
-        displayedAction = `batch of ${size}`
-      } else {
-        const tokenId = await readFirstStakedTokenId(nft, staking)
-        clause = exitMethod.asClause(tokenId, staking)
-        gas = 800000
-        comment = `callExit(${tokenId}, ${staking.slice(0, 10)}…)`
-        displayedAction = `tokenId ${tokenId}`
+      // 1. Enumerate `size` tokenIds at indices 0..size-1 (parallel reads)
+      log(`  Reading ${size} tokenIds via tokenOfOwnerByIndex...`, 'info')
+      const tokenIds = await readNextNTokenIds(nft, staking, size)
+      if (tokenIds.length !== size) {
+        log(`  Got ${tokenIds.length} tokenIds (expected ${size}). Trimming batch.`, 'err')
+      }
+      const actualSize = tokenIds.length
+      if (actualSize === 0) {
+        log('  No tokenIds returned. Aborting.', 'err')
+        break
       }
 
-      const r = await connex.vendor.sign('tx', [clause])
+      // 2. Build N exit() clauses
+      const clauses = tokenIds.map((tid) => exitMethod.asClause(tid))
+      log(`  TokenIds in this batch: ${tokenIds.join(', ')}`, 'info')
+
+      // 3. Sign multi-clause tx
+      // ~200k gas per exit on this contract; add 100k headroom for tx overhead.
+      const gas = 100000 + 220000 * actualSize
+      const r = await connex.vendor.sign('tx', clauses)
         .signer(state.signer)
         .gas(gas)
-        .comment(comment)
+        .comment(`exit() x ${actualSize} on ${staking.slice(0, 10)}…`)
         .request()
-      log(`  tx (${displayedAction}): ${r.txid}`, 'lime')
+      log(`  tx: ${r.txid}`, 'lime')
 
-      const receipt = await waitForReceipt(r.txid, { timeoutMs: 120000 })
+      // 4. Wait for receipt
+      const receipt = await waitForReceipt(r.txid, { timeoutMs: 180000 })
       if (receipt.reverted) {
         log(`  ${label} reverted. Waiting 5s before retrying...`, 'err')
         await new Promise((res) => setTimeout(res, 5000))
       } else {
         const newRemaining = await readBalanceOf(nft, staking).then(Number)
         setProgress(total - newRemaining, total)
-        log(`  confirmed in block ${receipt.meta.blockNumber}, remaining ${newRemaining}`, 'ok')
+        log(`  confirmed in block ${receipt.meta.blockNumber}. Remaining ${newRemaining}.`, 'ok')
       }
     } catch (err) {
       if (err && err.message && err.message.toLowerCase().includes('cancel')) {
@@ -505,9 +383,8 @@ async function startUnstake() {
     }
 
     batch += 1
-    // tiny pacing between txs to keep the UI smooth and avoid
-    // hammering the RPC with back-to-back getReceipt loops.
-    await new Promise((res) => setTimeout(res, 1500))
+    // tiny pacing between txs to keep the UI smooth.
+    await new Promise((res) => setTimeout(res, 1000))
   }
 
   log(`==== Unstake loop finished (stopped=${state.stopRequested}) ====`, 'lime')
@@ -528,15 +405,11 @@ function stopUnstake() {
 // ──────────────────────────────────────────────────────────────────────
 
 els.connectBtn.addEventListener('click', connectWallet)
-els.grantBtn.addEventListener('click', grantOperatorRoles)
+els.testOneBtn.addEventListener('click', testOneNFT)
 els.unstakeBtn.addEventListener('click', startUnstake)
 els.stopBtn.addEventListener('click', stopUnstake)
 els.refreshBtn.addEventListener('click', refreshBalance)
-$('testOneBtn').addEventListener('click', testOneNFT)
 
-// On load: poll for VeWorld injection and report what we see. Detection
-// runs through ensureConnex(), which understands both the modern
-// window.vechain shape and the legacy window.connex one.
 window.addEventListener('load', async () => {
   try {
     await ensureConnex()
